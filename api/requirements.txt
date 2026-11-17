@@ -7,6 +7,7 @@ bcrypt==4.2.1
 python-dotenv==1.2.2
 gunicorn==23.0.0
 celery[redis]==5.4.0
+kombu==5.4.0  # pin: kombu>=5.5 requires redis-py>=6.1 while redis is pinned 5.2.1
 redis==5.2.1
 cryptography==50.0.0
 pydantic==2.11.3
