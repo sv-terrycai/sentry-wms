@@ -766,13 +766,63 @@ def cancel_sales_order(
     }
 
 
+def _release_unattributed_residual(db, item_id: int, warehouse_id: int, residual: int) -> int:
+    """Release allocation with no backing pick_task.
+
+    Reserve-at-creation spreads a line across bins (fullest-bin-first)
+    without recording the bins on the line, so a cancel before any
+    pick task exists cannot unwind per task. Walk the (item,
+    warehouse) inventory rows still holding allocation,
+    fullest-allocated-first, until the residual is covered. The
+    aggregate available is exact; the per-bin spread may differ from
+    the original take order. Same pattern as the transfer-order
+    release path. GREATEST guards keep concurrent writers from
+    driving a row negative. Returns the quantity actually released.
+    """
+    remaining = max(int(residual), 0)
+    if not remaining:
+        return 0
+    released = 0
+    rows = db.execute(
+        text(
+            "SELECT inventory_id, quantity_allocated FROM inventory "
+            " WHERE item_id = :iid AND warehouse_id = :wid "
+            "   AND quantity_allocated > 0 "
+            " ORDER BY quantity_allocated DESC, inventory_id"
+        ),
+        {"iid": item_id, "wid": warehouse_id},
+    ).fetchall()
+    for row in rows:
+        if remaining <= 0:
+            break
+        give = min(int(row.quantity_allocated), remaining)
+        if give <= 0:
+            continue
+        db.execute(
+            text(
+                "UPDATE inventory "
+                "   SET quantity_allocated = GREATEST(0, quantity_allocated - :qty) "
+                " WHERE inventory_id = :inv_id"
+            ),
+            {"qty": give, "inv_id": row.inventory_id},
+        )
+        remaining -= give
+        released += give
+    return released
+
+
 def _unwind_allocated(db, so_id: int) -> None:
     """Pre-pick state unwind: release inventory.quantity_allocated for
-    each line's pending pick_tasks, zero out
+    each line's pending pick_tasks plus any taskless residual left by
+    reserve-at-creation, zero out
     sales_order_lines.quantity_allocated, then delete pending
     pick_tasks + pick_batch_orders. Safe to call on an OPEN SO with
     no allocation: the SELECT returns nothing and the DELETEs are
     no-ops."""
+    warehouse_id = db.execute(
+        text("SELECT warehouse_id FROM sales_orders WHERE so_id = :sid"),
+        {"sid": so_id},
+    ).scalar()
     lines = db.execute(
         text(
             "SELECT so_line_id, item_id, quantity_allocated "
@@ -803,6 +853,12 @@ def _unwind_allocated(db, so_id: int) -> None:
                     "bid": task.bin_id,
                 },
             )
+        residual = int(line.quantity_allocated or 0) - sum(
+            int(task.quantity_to_pick) for task in tasks
+        )
+        _release_unattributed_residual(
+            db, int(line.item_id), int(warehouse_id), residual
+        )
         db.execute(
             text(
                 "UPDATE sales_order_lines SET quantity_allocated = 0 "

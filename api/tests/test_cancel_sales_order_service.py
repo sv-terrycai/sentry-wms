@@ -226,6 +226,36 @@ class TestOpenWithAllocation:
         ).scalar()
         assert batch_orders == 0
 
+    def test_open_with_allocation_no_pick_task_releases_inventory(self, _db_transaction):
+        # Reserve-at-creation spreads allocation across bins without
+        # recording the bins on the line; cancelling before any pick
+        # task exists must still release inventory.quantity_allocated.
+        from services.sales_order_service import cancel_sales_order
+        db = _db_transaction
+        _ensure_user("op")
+        item_id = _insert_item()
+        so_id = _insert_so(status="OPEN")
+        _set_inv(item_id, bin_id=3, qty_on_hand=10, qty_allocated=8)
+        sol_id = _insert_so_line(so_id, item_id, qty_ordered=8,
+                                 qty_allocated=8, status="PENDING")
+
+        cancel_sales_order(db, so_id=so_id, source="admin", username="op")
+
+        on_hand, allocated = db.execute(
+            sa_text("SELECT quantity_on_hand, quantity_allocated FROM inventory "
+                    "WHERE item_id = :i AND bin_id = :b"),
+            {"i": item_id, "b": 3},
+        ).fetchone()
+        assert on_hand == 10  # untouched
+        assert allocated == 0  # released
+
+        sol_alloc = db.execute(
+            sa_text("SELECT quantity_allocated FROM sales_order_lines "
+                    "WHERE so_line_id = :s"),
+            {"s": sol_id},
+        ).fetchone().quantity_allocated
+        assert sol_alloc == 0
+
 
 class TestPickedStatus:
     def test_picked_restores_to_default_receiving_bin(self, _db_transaction):
