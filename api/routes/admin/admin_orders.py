@@ -3376,6 +3376,17 @@ def _release_so_line_allocation(db, so_line_id: int, warehouse_id: int) -> int:
         )
         released_total += task.quantity_to_pick
 
+    # Reserve-at-creation remainder with no backing task (same leak as
+    # the full-SO cancel path fixed in sales_order_service).
+    residual = int(line.quantity_allocated or 0) - released_total
+    if residual > 0:
+        from services.sales_order_service import (
+            _release_unattributed_residual as _release_residual,
+        )
+        released_total += _release_residual(
+            db, int(line.item_id), int(warehouse_id), residual
+        )
+
     db.execute(
         text(
             "DELETE FROM pick_tasks "
