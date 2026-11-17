@@ -37,6 +37,9 @@ services:
       context: .
       dockerfile: ./api/Dockerfile
     container_name: sentry-api
+    # JToys fork: pin the built image with the source commit for rollback
+    # (SENTRY_IMAGE_TAG=$(git rev-parse --short HEAD) docker compose up -d --build).
+    image: sentry-wms-api:${SENTRY_IMAGE_TAG:-local}
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-sentry}:${POSTGRES_PASSWORD:-sentry}@db:5432/${POSTGRES_DB:-sentry}
       JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env -- see .env.example}
@@ -122,6 +125,7 @@ services:
       context: .
       dockerfile: ./api/Dockerfile
     container_name: sentry-snapshot-keeper
+    image: sentry-wms-snapshot-keeper:${SENTRY_IMAGE_TAG:-local}
     command: python -m services.snapshot_keeper
     restart: unless-stopped
     depends_on:
@@ -163,6 +167,7 @@ services:
       context: .
       dockerfile: ./api/Dockerfile
     container_name: sentry-webhook-dispatcher
+    image: sentry-wms-webhook-dispatcher:${SENTRY_IMAGE_TAG:-local}
     command: python -m services.webhook_dispatcher
     restart: unless-stopped
     depends_on:
@@ -239,6 +244,7 @@ services:
       context: .
       dockerfile: ./api/Dockerfile
     container_name: sentry-connector-publisher
+    image: sentry-wms-connector-publisher:${SENTRY_IMAGE_TAG:-local}
     command: python -m services.connector_publisher
     restart: unless-stopped
     depends_on:
@@ -280,6 +286,7 @@ services:
       context: .
       dockerfile: ./api/Dockerfile
     container_name: sentry-celery
+    image: sentry-wms-celery:${SENTRY_IMAGE_TAG:-local}
     command: celery -A jobs worker --loglevel=info --pool=solo
     restart: unless-stopped
     depends_on:
@@ -301,6 +308,7 @@ services:
   admin:
     build: ./admin
     container_name: sentry-admin
+    image: sentry-wms-admin:${SENTRY_IMAGE_TAG:-local}
     ports:
       # V-040: same rationale as the api service -- loopback only by default.
       # Warehouse deployments that need LAN access (e.g. tablets/scanners)

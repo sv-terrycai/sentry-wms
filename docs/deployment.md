@@ -25,6 +25,13 @@ cp .env.example .env
 docker compose up -d
 ```
 
+Built images are tagged `sentry-wms-<service>:${SENTRY_IMAGE_TAG:-local}`.
+For a rollback-friendly deploy, stamp the source commit:
+
+```bash
+SENTRY_IMAGE_TAG=$(git rev-parse --short HEAD) docker compose up -d --build
+```
+
 This starts five containers:
 
 - **sentry-db** -- PostgreSQL 16 on port 5432 (bound to localhost only)
