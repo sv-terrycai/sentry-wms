@@ -16,6 +16,12 @@
 
 # Sentry WMS
 
+> **JToys fork.** This repo (`sv-terrycai/sentry-wms`) is JToys' working fork of
+> [`hightower-systems/sentry-wms`](https://github.com/hightower-systems/sentry-wms).
+> Upstream changes are **not** auto-merged: to evaluate one, `git fetch upstream`
+> (remote already points at hightower), review the diff, and cherry-pick by hand.
+> PRs go to this fork's `main`, never to upstream.
+
 **Open-source warehouse management system built for e-commerce.**
 
 Sentry is the link between the warehouse floor and your system of record. It connects barcode scans, pick tasks, and inventory movements to whatever database or ERP your business runs on.
