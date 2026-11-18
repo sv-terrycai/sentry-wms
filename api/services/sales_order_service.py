@@ -45,6 +45,8 @@ from constants import (
     ACTION_SO_STATUS_REVERTED,
     ACTION_SO_UNPACKED,
     ACTION_SO_UNSHIPPED,
+    ADJ_APPROVED,
+    ADJ_REASON_SHIPMENT,
     BATCH_COMPLETED,
     CANCEL_REASON_PARENT_CANCELLED,
     ORDER_TYPE_BACKORDER,
@@ -811,6 +813,53 @@ def _release_unattributed_residual(db, item_id: int, warehouse_id: int, residual
     return released
 
 
+def _write_shipment_adjustment(db, *, so_id, so_number, item_id, bin_id,
+                               warehouse_id, quantity, pick_task_id,
+                               order_no, username):
+    """Record the on-hand deduction of a shipment in inventory_adjustments.
+
+    Every on-hand change belongs in one table so finance and reconciliation
+    can read 期初 / mirror / shipment deductions side by side. The deduction
+    physically happens at pick time (record_admin_pick), so the row is
+    written there, not at admin-ship (which is bookkeeping only and must not
+    double-count on_hand).
+
+    reason_detail: "SO <so_number> shipment <pick_task_id> order <order_no>".
+    external_id is a UUID5 of (so_id, pick_task_id), so a retried pick can
+    never write a second row for the same pick task.
+    """
+    if int(quantity) <= 0:
+        return None
+    ext = str(uuid.uuid5(uuid.NAMESPACE_URL,
+                         "sentry:shipment-adjustment:%s:%s"
+                         % (so_id, pick_task_id)))
+    detail = "SO %s shipment %s order %s" % (
+        so_number, pick_task_id, order_no or "-")
+    row = db.execute(
+        text(
+            """
+            INSERT INTO inventory_adjustments
+                (item_id, bin_id, warehouse_id, quantity_change, reason_code,
+                 reason_detail, status, adjusted_by, external_id)
+            VALUES (:iid, :bid, :wid, :qty, :reason, :detail, :status,
+                    :user, :ext)
+            ON CONFLICT (external_id) DO NOTHING
+            RETURNING adjustment_id
+            """
+        ),
+        {"iid": item_id, "bid": bin_id, "wid": warehouse_id,
+         "qty": -int(quantity), "reason": ADJ_REASON_SHIPMENT,
+         "detail": detail[:500], "status": ADJ_APPROVED,
+         "user": username, "ext": ext},
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        return row.adjustment_id
+    except AttributeError:  # dict-like row (raw-cursor test shim)
+        return row["adjustment_id"]
+
+
 def _release_standing_reservation(db, item_id: int, warehouse_id: int,
                                   qty: int) -> int:
     """Release a pre-existing reservation that a pick consumes.
@@ -1495,6 +1544,7 @@ def record_admin_pick(db, *, so_id: int, picks, username: str) -> dict:
         for lid, ln in line_by_id.items()
     }
     reservations_released = 0
+    shipment_adjustment_ids: list[int] = []
     for seq, pick in enumerate(pick_entries, start=1):
         line = line_by_id[pick["so_line_id"]]
 
@@ -1587,6 +1637,18 @@ def record_admin_pick(db, *, so_id: int, picks, username: str) -> dict:
         ).scalar()
         created_task_ids.append(task_id)
 
+        # Audit the on-hand deduction in inventory_adjustments (see
+        # _write_shipment_adjustment): one row per pick task, negative qty,
+        # idempotent by (so_id, pick_task_id).
+        adj_id = _write_shipment_adjustment(
+            db, so_id=so_id, so_number=so.so_number,
+            item_id=line.item_id, bin_id=pick["bin_id"],
+            warehouse_id=so.warehouse_id, quantity=pick["quantity"],
+            pick_task_id=task_id, order_no=so.external_id,
+            username=username)
+        if adj_id:
+            shipment_adjustment_ids.append(adj_id)
+
         # Audit row per pick. details.source='admin_virtual' is the
         # discriminator that lets dashboards and post-incident readers
         # separate operator shortcuts from handheld floor work.
@@ -1620,6 +1682,7 @@ def record_admin_pick(db, *, so_id: int, picks, username: str) -> dict:
         "pick_task_ids": created_task_ids,
         "picks_applied": len(created_task_ids),
         "reservations_released": reservations_released,
+        "shipment_adjustment_ids": shipment_adjustment_ids,
     }
 
 
