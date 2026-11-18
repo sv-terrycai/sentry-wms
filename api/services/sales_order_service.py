@@ -833,8 +833,9 @@ def _write_shipment_adjustment(db, *, so_id, so_number, item_id, bin_id,
     ext = str(uuid.uuid5(uuid.NAMESPACE_URL,
                          "sentry:shipment-adjustment:%s:%s"
                          % (so_id, pick_task_id)))
-    detail = "SO %s shipment %s order %s" % (
-        so_number, pick_task_id, order_no or "-")
+    detail = "SO %s shipment pick_task %s" % (so_number, pick_task_id)
+    if order_no:
+        detail += " order %s" % order_no
     row = db.execute(
         text(
             """
