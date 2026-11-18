@@ -340,3 +340,30 @@ class TestShipmentAdjustmentAudit:
         assert first is not None and second is None
         rows = self._adjustments(item_id)
         assert len(rows) == 1
+
+
+class TestPickWithFullyReservedStock:
+    def test_pick_succeeds_when_all_stock_is_reserved_for_this_so(self, client):
+        # on_hand == allocated: available is 0, yet these units belong to
+        # this very SO, so the pick must still succeed.
+        item_id = _insert_item()
+        _set_inv(item_id, 3, qty_on_hand=3, qty_allocated=3)
+        so_id = _insert_so()
+        sol_id = _insert_line(so_id, item_id, qty_ordered=3, qty_allocated=3)
+        before = _inv(item_id, 3)
+        assert before["available"] == 0
+
+        resp = client.post(
+            f"/api/admin/sales-orders/{so_id}/admin-pick",
+            json={"lines": [{"so_line_id": sol_id, "bin_id": 3,
+                             "quantity": 3}]},
+            headers=_auth(client))
+        assert resp.status_code == 200, resp.get_json()
+        assert resp.get_json()["reservations_released"] == 3
+        after = _inv(item_id, 3)
+        assert after["on_hand"] == 0
+        assert after["allocated"] == 0
+        assert after["available"] == 0  # unchanged, never negative
+
+        assert client.post(f"/api/admin/sales-orders/{so_id}/admin-ship",
+                           json={}, headers=_auth(client)).status_code == 200

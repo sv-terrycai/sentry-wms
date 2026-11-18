@@ -1549,6 +1549,23 @@ def record_admin_pick(db, *, so_id: int, picks, username: str) -> dict:
     for seq, pick in enumerate(pick_entries, start=1):
         line = line_by_id[pick["so_line_id"]]
 
+        # Release this unit's own standing reservation BEFORE the available
+        # check. A reserve-at-creation line's units are already counted in
+        # inventory.quantity_allocated, so (on_hand - allocated) excludes
+        # them: without this the pick fails with no-available-bin whenever
+        # on_hand == allocated (i.e. all stock is reserved for this very
+        # order). Releasing first makes the check see the freed unit, and
+        # keeps on_hand and allocated falling together.
+        state = line_state[pick["so_line_id"]]
+        release = min(state["reservable"], pick["quantity"])
+        if release > 0:
+            released = _release_standing_reservation(
+                db, line.item_id, so.warehouse_id, release,
+            )
+            state["allocated"] = max(state["allocated"] - released, 0)
+            state["reservable"] = max(state["reservable"] - released, 0)
+            reservations_released += released
+
         # Atomic available check + on_hand decrement. The WHERE clause
         # is the safety: if available drops below the requested qty
         # between the validation read and the write, the UPDATE
@@ -1586,15 +1603,8 @@ def record_admin_pick(db, *, so_id: int, picks, username: str) -> dict:
         # is released from inventory by the same amount, so on_hand and
         # allocated fall together and available is unchanged. Lines with
         # no standing reservation keep the original picked-floor bump.
-        state = line_state[pick["so_line_id"]]
-        release = min(state["reservable"], pick["quantity"])
-        if release > 0:
-            released = _release_standing_reservation(
-                db, line.item_id, so.warehouse_id, release,
-            )
-            state["allocated"] = max(state["allocated"] - released, 0)
-            state["reservable"] = max(state["reservable"] - released, 0)
-            reservations_released += released
+        # Bump line counters (the reservation was already released above,
+        # before the available check).
         state["picked"] += pick["quantity"]
         state["allocated"] = max(state["allocated"], state["picked"])
         db.execute(
