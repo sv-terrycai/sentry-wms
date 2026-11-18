@@ -154,6 +154,10 @@ ADJ_REASON_SHORT       = "SHORT"
 # the SO number, pick_task and upstream order number so the row reconciles
 # against item_fulfillments.
 ADJ_REASON_SHIPMENT    = "SHIPMENT"
+# Stock coming back into the warehouse (cancel restore / picked-unit
+# release). Separate from SHIPMENT so shipment net stays equal to real
+# outbound movement and restores can be counted on their own.
+ADJ_REASON_RELEASE     = "RELEASE"
 
 # Audit Log action types
 ACTION_RECEIVE = "RECEIVE"

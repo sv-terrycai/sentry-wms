@@ -46,6 +46,7 @@ from constants import (
     ACTION_SO_UNPACKED,
     ACTION_SO_UNSHIPPED,
     ADJ_APPROVED,
+    ADJ_REASON_RELEASE,
     ADJ_REASON_SHIPMENT,
     BATCH_COMPLETED,
     CANCEL_REASON_PARENT_CANCELLED,
@@ -644,7 +645,7 @@ def cancel_sales_order(
         # allocation, drop pending tasks and pick_batch_orders.
         _unwind_allocated(db, so_id)
     elif pre_status in (SO_PICKED, SO_PACKED):
-        _unwind_picked_or_packed(db, so_id, warehouse_id)
+        _unwind_picked_or_packed(db, so_id, warehouse_id, username)
     # WAITING_STOCK (mig 067) is BO-only and inventory-free; no
     # per-status unwind beyond the status flip below.
 
@@ -813,6 +814,51 @@ def _release_unattributed_residual(db, item_id: int, warehouse_id: int, residual
     return released
 
 
+def _write_release_adjustment(db, *, so_id, so_number, item_id, bin_id,
+                              warehouse_id, quantity, key_token,
+                              username):
+    """Record stock coming BACK into the warehouse (positive qty).
+
+    Same table as SHIPMENT, distinct reason_code so the outbound net stays
+    equal to real shipments. Used by cancel-restore (bin = the receiving bin
+    the goods actually landed in) and by picked-unit release (bin = the
+    original pick bin).
+
+    external_id is UUID5(so_id, key_token), where key_token is
+    "cancel-restore:<so_line_id>" or "release:<pick_task_id>" - retries and
+    double-submits cannot write a second row.
+    """
+    if int(quantity) <= 0:
+        return None
+    ext = str(uuid.uuid5(uuid.NAMESPACE_URL,
+                         "sentry:release-adjustment:%s:%s"
+                         % (so_id, key_token)))
+    detail = "SO %s %s" % (so_number, key_token)
+    row = db.execute(
+        text(
+            """
+            INSERT INTO inventory_adjustments
+                (item_id, bin_id, warehouse_id, quantity_change, reason_code,
+                 reason_detail, status, adjusted_by, external_id)
+            VALUES (:iid, :bid, :wid, :qty, :reason, :detail, :status,
+                    :user, :ext)
+            ON CONFLICT (external_id) DO NOTHING
+            RETURNING adjustment_id
+            """
+        ),
+        {"iid": item_id, "bid": bin_id, "wid": warehouse_id,
+         "qty": int(quantity), "reason": ADJ_REASON_RELEASE,
+         "detail": detail[:500], "status": ADJ_APPROVED,
+         "user": username, "ext": ext},
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        return row.adjustment_id
+    except AttributeError:
+        return row["adjustment_id"]
+
+
 def _write_shipment_adjustment(db, *, so_id, so_number, item_id, bin_id,
                                warehouse_id, quantity, pick_task_id,
                                order_no, username):
@@ -976,7 +1022,8 @@ def _unwind_allocated(db, so_id: int) -> None:
     )
 
 
-def _unwind_picked_or_packed(db, so_id: int, warehouse_id: int) -> None:
+def _unwind_picked_or_packed(db, so_id: int, warehouse_id: int,
+                             username: str = "system") -> None:
     """Post-pick state unwind. Items have already left their source
     bins (decremented at pick-confirm time). Restore them to the
     default receiving bin so an operator can physically move them back
@@ -990,6 +1037,11 @@ def _unwind_picked_or_packed(db, so_id: int, warehouse_id: int) -> None:
     not show in batch listings.
     """
     receiving_bin_id = _get_default_receiving_bin(db)
+    so_row = db.execute(
+        text("SELECT so_number FROM sales_orders WHERE so_id = :sid"),
+        {"sid": so_id},
+    ).fetchone()
+    so_number = so_row.so_number if so_row else str(so_id)
 
     lines = db.execute(
         text(
@@ -1013,6 +1065,14 @@ def _unwind_picked_or_packed(db, so_id: int, warehouse_id: int) -> None:
             quantity=line.quantity_picked,
             lot_number=None,
         )
+        # Mirror the restore into inventory_adjustments (positive RELEASE),
+        # bin = the receiving bin the goods actually landed in.
+        _write_release_adjustment(
+            db, so_id=so_id, so_number=so_number, item_id=line.item_id,
+            bin_id=receiving_bin_id, warehouse_id=warehouse_id,
+            quantity=line.quantity_picked,
+            key_token="cancel-restore:%s" % line.so_line_id,
+            username=username)
         db.execute(
             text(
                 "UPDATE sales_order_lines "
@@ -1199,6 +1259,14 @@ def revert_sales_order_status(
                     quantity=qty_picked,
                     lot_number=None,
                 )
+                # Mirror the restore: bin = the original pick bin, keyed by
+                # pick task so a retried release writes no second row.
+                _write_release_adjustment(
+                    db, so_id=so_id, so_number=so.so_number,
+                    item_id=t.item_id, bin_id=t.bin_id,
+                    warehouse_id=so.warehouse_id, quantity=qty_picked,
+                    key_token="release:%s" % t.pick_task_id,
+                    username=username)
             db.execute(
                 text(
                     "UPDATE sales_order_lines "
