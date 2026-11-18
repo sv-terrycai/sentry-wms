@@ -11,6 +11,7 @@ from sqlalchemy import text
 from services.audit_service import write_audit_log
 from services.connector_stub import enrich_order
 from services.events_service import emit_event, get_user_external_id, resolve_source_external_id
+from services.adjustments_service import write_adjustment
 from services.inventory_service import add_inventory
 
 from constants import (
@@ -1922,6 +1923,17 @@ def full_revert_batch(db, batch_id, username):
                     quantity=qty_picked,
                     lot_number=None,
                 )
+                # Same RELEASE convention as the single-order release path,
+                # keyed by pick task so a retried batch cancel writes once.
+                write_adjustment(
+                    db, item_id=t.item_id, bin_id=t.bin_id,
+                    warehouse_id=batch.warehouse_id,
+                    quantity_change=qty_picked,
+                    reason_code="RELEASE",
+                    key="release:%s" % t.pick_task_id,
+                    reason_detail="batch %s release pick_task %s"
+                    % (batch.batch_id, t.pick_task_id),
+                    username=username)
                 write_audit_log(
                     db,
                     action_type=ACTION_SO_PICK_RELEASED,

@@ -46,6 +46,7 @@ from constants import (
     ACTION_SO_UNPACKED,
     ACTION_SO_UNSHIPPED,
     ADJ_APPROVED,
+    ADJ_REASON_INBOUND,
     ADJ_REASON_RELEASE,
     ADJ_REASON_SHIPMENT,
     BATCH_COMPLETED,
@@ -69,6 +70,7 @@ from constants import (
 )
 from services.audit_service import write_audit_log
 from services.events_service import emit_event, get_user_external_id
+from services.adjustments_service import write_adjustment
 from services.inventory_service import add_inventory
 
 
@@ -324,6 +326,15 @@ def receive_rma(
     ).fetchone()
 
     add_inventory(db, item_id, bin_id, warehouse_id, quantity, None)
+    # Ledger row: returned goods physically re-entered the warehouse. Keyed on
+    # the receipt's external_id (== the caller's idempotency key), so a retry
+    # of receive-return cannot double-count.
+    write_adjustment(
+        db, item_id=item_id, bin_id=bin_id, warehouse_id=warehouse_id,
+        quantity_change=quantity, reason_code=ADJ_REASON_INBOUND,
+        key="rma:%s" % (idempotency_key or receipt.external_id),
+        reason_detail="RMA %s return receipt %s" % (rma.so_number, receipt.receipt_id),
+        username=received_by)
 
     # quantity_received is denormalized (not re-derived from item_receipts at
     # read time). Return receipts are deliberately append-only: there is no void

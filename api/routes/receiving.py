@@ -12,12 +12,14 @@ from constants import (
     PO_OPEN, PO_PARTIAL, PO_RECEIVED, PO_CLOSED,
     POL_PENDING, POL_PARTIAL, POL_RECEIVED,
     ACTION_RECEIVE, ACTION_RECEIVE_CANCEL,
+    ADJ_REASON_INBOUND,
 )
 from middleware.auth_middleware import require_auth, warehouse_scope_clause
 from middleware.db import with_db
 from schemas.receiving import CancelReceivingRequest, ReceiveItemsRequest
 from services.audit_service import write_audit_log
 from services.events_service import emit_event, get_user_external_id, resolve_source_external_id
+from services.adjustments_service import write_adjustment
 from services.inventory_service import (
     add_inventory,
     release_satisfiable_backorders,
@@ -127,7 +129,7 @@ def receive_items(validated):
     po = g.db.execute(
         text(
             f"""
-            SELECT po_id, status, warehouse_id, external_id FROM purchase_orders
+            SELECT po_id, po_number, status, warehouse_id, external_id FROM purchase_orders
             WHERE po_id = :po_id {scope_clause}
             FOR UPDATE
             """
@@ -308,6 +310,15 @@ def receive_items(validated):
 
         # 4. Create or update inventory
         add_inventory(g.db, item_id, bin_id, warehouse_id, quantity, lot_number)
+
+        # 4b. Ledger row: stock entered the warehouse. Keyed on the receipt's
+        # own external_id so a retried POST cannot double-count.
+        write_adjustment(
+            g.db, item_id=item_id, bin_id=bin_id, warehouse_id=warehouse_id,
+            quantity_change=quantity, reason_code=ADJ_REASON_INBOUND,
+            key="receipt:%s" % receipt_external_id,
+            reason_detail="PO %s receipt %s" % (po.po_number, receipt_id),
+            username=username)
 
         # 5. Audit log (deferred)
         # quantity_ordered + quantity_received_before make the row
@@ -525,6 +536,17 @@ def cancel_receiving(validated):
                 WHERE item_id = :iid AND bin_id = :bid AND warehouse_id = :wid
             """),
             {"qty": receipt.quantity_received, "iid": receipt.item_id, "bid": receipt.bin_id, "wid": receipt.warehouse_id},
+        )
+        # 1b. Ledger row for the reversal (INBOUND with a negative qty).
+        # The receipt row is deleted below, so key on its id.
+        write_adjustment(
+            g.db, item_id=receipt.item_id, bin_id=receipt.bin_id,
+            warehouse_id=receipt.warehouse_id,
+            quantity_change=-receipt.quantity_received,
+            reason_code=ADJ_REASON_INBOUND,
+            key="receipt-void:%s" % receipt.receipt_id,
+            reason_detail="void receipt %s" % receipt.receipt_id,
+            username=getattr(g, "current_user", {}).get("username", "system"),
         )
 
         # 2. Reverse PO line quantity

@@ -36,6 +36,7 @@ from middleware.auth_middleware import require_admin_or_page_permission, require
 from middleware.db import with_db
 from routes.admin import admin_bp
 from schemas.csv_import import TransferOrderImportRow
+from services.adjustments_service import record_bin_move, write_adjustment
 from services.audit_service import write_audit_log
 from services.events_service import emit_event, resolve_source_external_id
 from services.transfer_order_service import (
@@ -1055,6 +1056,7 @@ def _decrement_source_inventory(
         {"iid": item_id, "wid": warehouse_id},
     ).fetchall()
     remaining = qty
+    deducted = []
     for ir in inv_rows:
         if remaining <= 0:
             break
@@ -1073,6 +1075,7 @@ def _decrement_source_inventory(
             ),
             {"delta": give, "inv_id": ir.inventory_id},
         )
+        deducted.append((ir.inventory_id, give))
         remaining -= give
     if remaining > 0:
         # Source under-funded: import-time reservation must have been
@@ -1082,6 +1085,7 @@ def _decrement_source_inventory(
             f"source inventory under-funded: still {remaining} units to "
             f"deduct for item_id={item_id} at warehouse_id={warehouse_id}"
         )
+    return deducted
 
 
 def _credit_destination_inventory(
@@ -1228,12 +1232,43 @@ def approve_transfer_order_approval(to_id, approval_id):
                 ),
                 {"qty": qty, "lid": line_id},
             )
-            _decrement_source_inventory(
+            source_bins = _decrement_source_inventory(
                 g.db, item_id, header.source_warehouse_id, qty,
             )
             _credit_destination_inventory(
                 g.db, item_id, header.destination_warehouse_id, qty,
             )
+            # Ledger pair: stock left specific source bins and landed in the
+            # destination Staging bin. Keyed by TO external_id + line so a
+            # retried approval writes nothing new.
+            dest_bin = g.db.execute(
+                text("SELECT bin_id FROM bins WHERE warehouse_id = :wid "
+                     "AND bin_type = 'Staging' ORDER BY bin_id ASC LIMIT 1"),
+                {"wid": header.destination_warehouse_id},
+            ).fetchone()
+            key_base = "to:%s:%s" % (header.external_id, line_id)
+            for inv_id, gave in source_bins:
+                src_bin = g.db.execute(
+                    text("SELECT bin_id FROM inventory WHERE inventory_id = :iid"),
+                    {"iid": inv_id},
+                ).fetchone()
+                write_adjustment(
+                    g.db, item_id=item_id, bin_id=src_bin.bin_id,
+                    warehouse_id=header.source_warehouse_id,
+                    quantity_change=-gave, reason_code="TRANSFER",
+                    key="%s:from:%s" % (key_base, inv_id),
+                    reason_detail="TO %s approval %s out"
+                    % (header.to_number, approval_id),
+                    username=g.current_user["username"])
+            if dest_bin:
+                write_adjustment(
+                    g.db, item_id=item_id, bin_id=dest_bin.bin_id,
+                    warehouse_id=header.destination_warehouse_id,
+                    quantity_change=qty, reason_code="INBOUND",
+                    key="%s:to" % key_base,
+                    reason_detail="TO %s approval %s in"
+                    % (header.to_number, approval_id),
+                    username=g.current_user["username"])
             item_external = g.db.execute(
                 text("SELECT external_id FROM items WHERE item_id = :iid"),
                 {"iid": item_id},

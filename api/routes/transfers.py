@@ -14,6 +14,7 @@ from middleware.db import with_db
 from schemas.bin_transfer import MoveRequest
 from services.audit_service import write_audit_log
 from services.events_service import emit_event, resolve_source_external_id
+from services.adjustments_service import record_bin_move
 from services.inventory_service import move_inventory
 from utils.validation import validate_body
 
@@ -107,6 +108,15 @@ def move(validated):
     transfer_id = transfer_row.transfer_id
     transfer_external_id = transfer_row.external_id
     transferred_at = transfer_row.transferred_at
+
+    # 3b. Ledger: per-bin pair (source -, destination +) keyed on the
+    # transfer's external_id so a retry writes nothing new.
+    record_bin_move(
+        g.db, item_id=item_id, from_bin_id=from_bin_id,
+        to_bin_id=to_bin_id, warehouse_id=warehouse_id,
+        quantity=quantity, key="transfer:%s" % transfer_external_id,
+        username=username,
+        reason_detail="MOVE transfer %s" % transfer_id)
 
     # 4. Audit log
     write_audit_log(

@@ -14,6 +14,7 @@ from schemas.bins import CreateBinRequest, UpdateBinRequest
 from schemas.warehouses import CreateWarehouseRequest, InterWarehouseTransferRequest, UpdateWarehouseRequest
 from schemas.zones import CreateZoneRequest, UpdateZoneRequest
 from services.audit_service import write_audit_log
+from services.adjustments_service import record_bin_move
 from services.inventory_service import (
     add_inventory,
     set_inventory_quantity,
@@ -607,7 +608,7 @@ def create_inter_warehouse_transfer(validated):
         text("""
             INSERT INTO bin_transfers (item_id, from_bin_id, to_bin_id, warehouse_id, quantity, transferred_by, transfer_type, reason, external_id)
             VALUES (:iid, :from_bid, :to_bid, :wid, :qty, :username, 'INTER_WAREHOUSE', :reason, :ext_id)
-            RETURNING transfer_id, transferred_at
+            RETURNING transfer_id, external_id, transferred_at
         """),
         {
             "iid": item_id, "from_bid": from_bin_id, "to_bid": to_bin_id,
@@ -617,6 +618,16 @@ def create_inter_warehouse_transfer(validated):
             "ext_id": str(uuid.uuid4()),
         },
     ).fetchone()
+
+    # Ledger: inter-warehouse move is still a bin-to-bin pair for each
+    # warehouse's own reconciliation.
+    record_bin_move(
+        g.db, item_id=item_id, from_bin_id=from_bin_id,
+        to_bin_id=to_bin_id, warehouse_id=from_warehouse_id,
+        quantity=quantity,
+        key="xfer:%s:%s" % (transfer.external_id, to_warehouse_id),
+        username=g.current_user["username"],
+        reason_detail="INTER_WAREHOUSE transfer %s" % transfer.transfer_id)
 
     user_id = g.current_user["user_id"]
     transfer_details = {

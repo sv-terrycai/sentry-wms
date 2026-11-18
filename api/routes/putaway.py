@@ -12,6 +12,7 @@ from middleware.auth_middleware import require_auth, check_warehouse_access
 from middleware.db import with_db
 from schemas.putaway import ConfirmPutawayRequest, UpdatePreferredRequest
 from services.audit_service import write_audit_log
+from services.adjustments_service import record_bin_move
 from services.inventory_service import move_inventory
 from constants import ACTION_PUTAWAY, BIN_PICKABLE, BIN_STAGING, BIN_PICKABLE_STAGING
 from utils.validation import validate_body
@@ -380,7 +381,16 @@ def confirm_putaway(validated):
             "ext_id": str(uuid.uuid4()),
         },
     )
-    transfer_id = result.fetchone()[0]
+    putaway_transfer = result.fetchone()
+    transfer_id = putaway_transfer[0]
+    # Ledger: PUTAWAY moves stock between bins; total unchanged, so a
+    # per-bin pair is the only way to reconcile each bin.
+    record_bin_move(
+        g.db, item_id=item_id, from_bin_id=from_bin_id,
+        to_bin_id=to_bin_id, warehouse_id=warehouse_id,
+        quantity=quantity, key="putaway:%s:%s" % (transfer_id, item_id),
+        username=username,
+        reason_detail="PUTAWAY transfer %s" % transfer_id)
 
     # 4. Audit
     write_audit_log(

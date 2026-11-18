@@ -158,6 +158,11 @@ ADJ_REASON_SHIPMENT    = "SHIPMENT"
 # release). Separate from SHIPMENT so shipment net stays equal to real
 # outbound movement and restores can be counted on their own.
 ADJ_REASON_RELEASE     = "RELEASE"
+# Stock arriving from outside the warehouse (PO receipt, RMA restock, TO
+# receipt). A void of an inbound is the same code with a negative qty.
+ADJ_REASON_INBOUND     = "INBOUND"
+# Bin-to-bin move: source row negative, destination row positive, net zero.
+ADJ_REASON_TRANSFER    = "TRANSFER"
 
 # Audit Log action types
 ACTION_RECEIVE = "RECEIVE"
