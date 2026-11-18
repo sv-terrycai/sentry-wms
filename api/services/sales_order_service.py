@@ -811,6 +811,55 @@ def _release_unattributed_residual(db, item_id: int, warehouse_id: int, residual
     return released
 
 
+def _release_standing_reservation(db, item_id: int, warehouse_id: int,
+                                  qty: int) -> int:
+    """Release a pre-existing reservation that a pick consumes.
+
+    A bridge-created / POS / reserve-at-creation line carries a standing
+    reservation (line quantity_allocated > quantity_picked) with no pick
+    task recording the bin. Converting that reserved unit into a picked
+    unit must also drop inventory.quantity_allocated, otherwise the bin
+    keeps a reservation for stock that has left the shelf and available
+    never recovers. Walks the item's allocated rows in inventory_id order
+    (the warehouse-wide lock order) and GREATEST-guards each decrement.
+
+    Returns the quantity actually released (0 when the warehouse no longer
+    holds the allocation, e.g. a concurrent cancel won the race).
+    """
+    remaining = max(int(qty), 0)
+    if not remaining:
+        return 0
+    released = 0
+    rows = db.execute(
+        text(
+            "SELECT inventory_id, quantity_allocated FROM inventory "
+            " WHERE item_id = :iid AND warehouse_id = :wid "
+            "   AND quantity_allocated > 0 "
+            " ORDER BY inventory_id ASC "
+            " FOR UPDATE"
+        ),
+        {"iid": item_id, "wid": warehouse_id},
+    ).fetchall()
+    for row in rows:
+        if remaining <= 0:
+            break
+        give = min(int(row.quantity_allocated), remaining)
+        if give <= 0:
+            continue
+        db.execute(
+            text(
+                "UPDATE inventory "
+                "   SET quantity_allocated = GREATEST(0, quantity_allocated - :qty), "
+                "       updated_at = NOW() "
+                " WHERE inventory_id = :inv_id"
+            ),
+            {"qty": give, "inv_id": row.inventory_id},
+        )
+        remaining -= give
+        released += give
+    return released
+
+
 def _unwind_allocated(db, so_id: int) -> None:
     """Pre-pick state unwind: release inventory.quantity_allocated for
     each line's pending pick_tasks plus any taskless residual left by
@@ -1435,6 +1484,17 @@ def record_admin_pick(db, *, so_id: int, picks, username: str) -> dict:
     )
 
     created_task_ids: list[int] = []
+    # Running per-line counters: a line may be picked from several bins in
+    # one batch, so the standing-reservation release must see each prior
+    # entry of the same call.
+    line_state = {
+        lid: {"allocated": int(ln.quantity_allocated or 0),
+              "picked": int(ln.quantity_picked or 0),
+              "reservable": max(int(ln.quantity_allocated or 0)
+                                - int(ln.quantity_picked or 0), 0)}
+        for lid, ln in line_by_id.items()
+    }
+    reservations_released = 0
     for seq, pick in enumerate(pick_entries, start=1):
         line = line_by_id[pick["so_line_id"]]
 
@@ -1469,19 +1529,33 @@ def record_admin_pick(db, *, so_id: int, picks, username: str) -> dict:
                 requested=pick["quantity"],
             )
 
-        # Bump line counters. GREATEST keeps quantity_allocated >= the
-        # new picked floor without overriding a higher standing
-        # reservation (matching the handheld path's invariant).
+        # Bump line counters. A line that already carried a standing
+        # reservation (bridge / POS / reserve-at-creation) converts the
+        # reserved units it just picked into picked units: the reservation
+        # is released from inventory by the same amount, so on_hand and
+        # allocated fall together and available is unchanged. Lines with
+        # no standing reservation keep the original picked-floor bump.
+        state = line_state[pick["so_line_id"]]
+        release = min(state["reservable"], pick["quantity"])
+        if release > 0:
+            released = _release_standing_reservation(
+                db, line.item_id, so.warehouse_id, release,
+            )
+            state["allocated"] = max(state["allocated"] - released, 0)
+            state["reservable"] = max(state["reservable"] - released, 0)
+            reservations_released += released
+        state["picked"] += pick["quantity"]
+        state["allocated"] = max(state["allocated"], state["picked"])
         db.execute(
             text(
                 "UPDATE sales_order_lines "
-                "   SET quantity_picked = quantity_picked + :qty, "
-                "       quantity_allocated = GREATEST( "
-                "           quantity_allocated, quantity_picked + :qty "
-                "       ) "
+                "   SET quantity_picked = :picked, "
+                "       quantity_allocated = :allocated "
                 " WHERE so_line_id = :sol_id"
             ),
-            {"qty": pick["quantity"], "sol_id": pick["so_line_id"]},
+            {"picked": state["picked"],
+             "allocated": state["allocated"],
+             "sol_id": pick["so_line_id"]},
         )
 
         # Synthetic pick_task. status=PICKED, scan_confirmed=true,
@@ -1545,6 +1619,7 @@ def record_admin_pick(db, *, so_id: int, picks, username: str) -> dict:
         "batch_number": batch_number,
         "pick_task_ids": created_task_ids,
         "picks_applied": len(created_task_ids),
+        "reservations_released": reservations_released,
     }
 
 
