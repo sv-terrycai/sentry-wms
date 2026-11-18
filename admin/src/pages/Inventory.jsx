@@ -116,7 +116,26 @@ export default function Inventory() {
     { key: 'bin_code', label: 'Bin Code', mono: true, sortable: true },
     { key: 'zone_name', label: 'Zone', sortable: true },
     { key: 'quantity_on_hand', label: 'On Hand', sortable: true },
-    { key: 'available', label: 'Available', sortable: true, render: (r) => (r.quantity_on_hand || 0) - (r.committed_to_orders || 0) },
+    // Available belongs to THIS bin row: on_hand - allocated from the same
+    // inventory row. Never subtract the item-level commitment here — doing
+    // that made every zero-stock bin show -(all unshipped units for the
+    // item), e.g. RECV-01 0 on hand rendered as -156.
+    {
+      key: 'quantity_available',
+      label: 'Available',
+      sortable: true,
+      render: (r) => (r.quantity_available != null
+        ? r.quantity_available
+        : (r.quantity_on_hand || 0) - (r.quantity_allocated || 0)),
+    },
+    // Item-level figure, deliberately its own column and label so it can
+    // never be mistaken for a per-bin number.
+    {
+      key: 'committed_to_orders',
+      label: 'Committed (item total)',
+      sortable: true,
+      render: (r) => r.committed_to_orders ?? 0,
+    },
     { key: 'last_counted_at', label: 'Last Counted', mono: true, sortable: true, render: (r) => r.last_counted_at ? new Date(r.last_counted_at).toLocaleDateString() : '-' },
   ];
 

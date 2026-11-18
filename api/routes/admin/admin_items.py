@@ -377,14 +377,27 @@ def list_inventory():
             SELECT inv.inventory_id, inv.item_id, i.sku, i.item_name, inv.bin_id, b.bin_code, z.zone_name,
                    inv.quantity_on_hand, inv.quantity_allocated,
                    (inv.quantity_on_hand - inv.quantity_allocated) AS quantity_available,
+                   -- Item-level commitment, deliberately two separate numbers:
+                   --   committed_to_orders = still on the shelf but promised
+                   --     (allocated minus the part already picked)
+                   --   picked_not_shipped = already off the shelf, not shipped
+                   -- on_hand already dropped when the units were picked, so
+                   -- folding picked units into "committed" double-counted them
+                   -- and under-reported available.
                    COALESCE((
-                       SELECT SUM(sol.quantity_ordered - sol.quantity_shipped)
+                       SELECT SUM(GREATEST(sol.quantity_allocated - sol.quantity_picked, 0))
                        FROM sales_order_lines sol
                        JOIN sales_orders so ON so.so_id = sol.so_id
                        WHERE sol.item_id = inv.item_id
                          AND so.status IN ('OPEN', 'PICKED', 'PACKED')
-                         AND sol.quantity_ordered > sol.quantity_shipped
                    ), 0) AS committed_to_orders,
+                   COALESCE((
+                       SELECT SUM(GREATEST(sol.quantity_picked - sol.quantity_shipped, 0))
+                       FROM sales_order_lines sol
+                       JOIN sales_orders so ON so.so_id = sol.so_id
+                       WHERE sol.item_id = inv.item_id
+                         AND so.status IN ('PICKED', 'PACKED')
+                   ), 0) AS picked_not_shipped,
                    inv.lot_number, inv.last_counted_at
             FROM inventory inv
             JOIN items i ON i.item_id = inv.item_id
@@ -403,6 +416,7 @@ def list_inventory():
              "quantity_on_hand": r.quantity_on_hand, "quantity_allocated": r.quantity_allocated,
              "quantity_available": r.quantity_available,
              "committed_to_orders": r.committed_to_orders,
+             "picked_not_shipped": r.picked_not_shipped,
              "lot_number": r.lot_number,
              "last_counted_at": r.last_counted_at.isoformat() if r.last_counted_at else None}
             for r in rows
@@ -576,6 +590,16 @@ def _import_bin(db, row: BinImportRow, raw_rec: dict):
         ).fetchone()
         if zone_row:
             zone_id = zone_row.zone_id
+    if not zone_id:
+        # Single-zone warehouse: resolve automatically instead of demanding a
+        # field the operator has no meaningful choice for.
+        zones = db.execute(
+            text("SELECT zone_id FROM zones WHERE warehouse_id = :wid "
+                 "AND is_active ORDER BY zone_id"),
+            {"wid": row.warehouse_id or 1},
+        ).fetchall()
+        if len(zones) == 1:
+            zone_id = zones[0].zone_id
     if not zone_id:
         if zone_value:
             raise _SkipRow(f"Zone '{zone_value}' not found. Create the zone first, then import bins.")
