@@ -257,3 +257,86 @@ class TestShipKeepsAvailableAndCancelRaisesIt:
         assert after["allocated"] == 0
         assert after["on_hand"] == before["on_hand"]      # goods stay
         assert after["available"] == before["available"] + 4  # rises on cancel
+
+
+class TestShipmentAdjustmentAudit:
+    def _adjustments(self, item_id):
+        conn = get_raw_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT quantity_change, reason_code, reason_detail, status, "
+            "       adjusted_by FROM inventory_adjustments "
+            " WHERE item_id = %s AND reason_code = 'SHIPMENT' "
+            " ORDER BY adjustment_id",
+            (item_id,),
+        )
+        rows = cur.fetchall()
+        cur.close()
+        return rows
+
+    def test_ship_writes_one_negative_shipment_adjustment(self, client):
+        item_id = _insert_item()
+        _set_inv(item_id, 3, qty_on_hand=10, qty_allocated=3)
+        so_id = _insert_so()
+        sol_id = _insert_line(so_id, item_id, qty_ordered=3, qty_allocated=3)
+
+        pick = client.post(
+            f"/api/admin/sales-orders/{so_id}/admin-pick",
+            json={"lines": [{"so_line_id": sol_id, "bin_id": 3,
+                             "quantity": 3}]},
+            headers=_auth(client))
+        assert pick.status_code == 200, pick.get_json()
+        adj_ids = pick.get_json()["shipment_adjustment_ids"]
+        assert len(adj_ids) == 1
+
+        ship = client.post(f"/api/admin/sales-orders/{so_id}/admin-ship",
+                           json={}, headers=_auth(client))
+        assert ship.status_code == 200, ship.get_json()
+
+        rows = self._adjustments(item_id)
+        assert len(rows) == 1
+        change, reason, detail, status, who = rows[0]
+        assert change == -3
+        assert reason == "SHIPMENT"
+        assert "shipment" in detail and "SO " in detail
+        assert status == "APPROVED"
+        assert who
+
+        # A second ship attempt is refused and must not add a row.
+        again = client.post(f"/api/admin/sales-orders/{so_id}/admin-ship",
+                            json={}, headers=_auth(client))
+        assert again.status_code in (409, 422)
+        assert len(self._adjustments(item_id)) == 1
+
+    def test_shipment_adjustment_is_idempotent_per_pick_task(self, client):
+        import psycopg2.extras
+        from sqlalchemy import text
+        from services.sales_order_service import _write_shipment_adjustment
+        from db_test_context import get_raw_connection
+
+        class _Adapter:
+            """Minimal session shim: the service expects .execute(stmt, params)."""
+
+            def __init__(self, conn):
+                self.conn = conn
+
+            def execute(self, stmt, params):
+                from sqlalchemy.dialects import postgresql
+                compiled = stmt.compile(dialect=postgresql.dialect())
+                cur = self.conn.cursor(
+                    cursor_factory=psycopg2.extras.RealDictCursor)
+                cur.execute(str(compiled), params)
+                return cur
+
+        item_id = _insert_item()
+        _set_inv(item_id, 3, qty_on_hand=5, qty_allocated=0)
+        so_id = _insert_so()
+        db = _Adapter(get_raw_connection())
+        kwargs = dict(so_id=so_id, so_number="SO-DUP", item_id=item_id,
+                      bin_id=3, warehouse_id=1, quantity=2,
+                      pick_task_id=999999, order_no="#1", username="admin")
+        first = _write_shipment_adjustment(db, **kwargs)
+        second = _write_shipment_adjustment(db, **kwargs)
+        assert first is not None and second is None
+        rows = self._adjustments(item_id)
+        assert len(rows) == 1

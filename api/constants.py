@@ -149,6 +149,11 @@ ADJ_REASON_FOUND       = "FOUND"
 ADJ_REASON_LOST        = "LOST"
 ADJ_REASON_CORRECTION  = "CORRECTION"
 ADJ_REASON_SHORT       = "SHORT"
+# Outbound shipment deduction: on-hand left the shelf for a sales order.
+# Written by admin-pick (where on_hand actually moves); reason_detail carries
+# the SO number, pick_task and upstream order number so the row reconciles
+# against item_fulfillments.
+ADJ_REASON_SHIPMENT    = "SHIPMENT"
 
 # Audit Log action types
 ACTION_RECEIVE = "RECEIVE"
