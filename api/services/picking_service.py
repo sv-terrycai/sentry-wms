@@ -795,6 +795,43 @@ def confirm_pick(db, pick_task_id, scanned_barcode, quantity_picked, username):
             {"picked": quantity_picked, "allocated": task.quantity_to_pick, "iid": task.item_id, "bid": task.bin_id},
         )
 
+        # 5b. Record the on-hand deduction in inventory_adjustments so every
+        # outbound movement (admin pick, scan pick, opening, mirror) is
+        # readable from one table. Wave picks contribute to several SOs, so
+        # each contributing SO gets its own row (quantity from the
+        # breakdown), keyed by UUID5(so_id, pick_task_id) for idempotency.
+        from services.sales_order_service import _write_shipment_adjustment
+        batch_wh = db.execute(
+            text("SELECT warehouse_id FROM pick_batches WHERE batch_id = :bid"),
+            {"bid": task.batch_id},
+        ).scalar()
+        if breakdown:
+            for bd in breakdown:
+                so_row = db.execute(
+                    text("SELECT so_number, external_id FROM sales_orders WHERE so_id = :sid"),
+                    {"sid": bd.so_id},
+                ).fetchone()
+                if so_row is None:
+                    continue
+                _write_shipment_adjustment(
+                    db, so_id=bd.so_id, so_number=so_row.so_number,
+                    item_id=task.item_id, bin_id=task.bin_id,
+                    warehouse_id=batch_wh,
+                    quantity=bd.quantity, pick_task_id=pick_task_id,
+                    order_no=so_row.external_id, username=username)
+        else:
+            so_row = db.execute(
+                text("SELECT so_number, external_id FROM sales_orders WHERE so_id = :sid"),
+                {"sid": task.so_id},
+            ).fetchone()
+            if so_row is not None:
+                _write_shipment_adjustment(
+                    db, so_id=task.so_id, so_number=so_row.so_number,
+                    item_id=task.item_id, bin_id=task.bin_id,
+                    warehouse_id=batch_wh,
+                    quantity=quantity_picked, pick_task_id=pick_task_id,
+                    order_no=so_row.external_id, username=username)
+
     # 6. Get remaining count
     remaining = db.execute(
         text("SELECT COUNT(*) FROM pick_tasks WHERE batch_id = :bid AND status = :task_status"),
