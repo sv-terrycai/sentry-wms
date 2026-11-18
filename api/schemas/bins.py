@@ -8,7 +8,8 @@ VALID_BIN_TYPES = ("Staging", "PickableStaging", "Pickable")
 
 
 class CreateBinRequest(BaseModel):
-    zone_id: int = Field(..., gt=0)
+    # Optional: a single-zone warehouse resolves it automatically.
+    zone_id: Optional[int] = Field(None, gt=0)
     warehouse_id: int = Field(..., gt=0)
     bin_code: str = Field(..., min_length=1, max_length=64)
     bin_barcode: str = Field(..., min_length=1, max_length=128)

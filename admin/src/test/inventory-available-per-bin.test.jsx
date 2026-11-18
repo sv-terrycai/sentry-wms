@@ -1,17 +1,18 @@
 /**
- * Inventory page Available must be a per-bin number.
+ * Inventory page: per-bin Available, zero-row hiding, single-zone chrome.
  *
  * Terry's screenshot: SKU 810199503806 showed RECV-01 as "On Hand 0,
  * Available -156". The stock data was right; the page subtracted the
  * ITEM-level commitment from the BIN-level on-hand, so every empty bin
  * rendered as -(everything unshipped for that item).
  *
- * Per-bin Available = quantity_on_hand - quantity_allocated.
+ * Per-bin Available = quantity_on_hand - quantity_allocated (quantity_available
+ * from the API). The item-level commitment lives in its own labelled column.
  */
 
 import React from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 
 const apiGetMock = vi.fn();
 vi.mock('../api.js', () => ({
@@ -44,15 +45,14 @@ function row(overrides) {
   };
 }
 
-beforeEach(() => {
-  apiGetMock.mockReset();
+function mockApi({ zoneCount = 1 } = {}) {
+  const bins = [{ bin_id: 3, bin_code: 'BULK-01', zone_id: 4, zone_name: 'Bulk' }];
+  if (zoneCount > 1) bins.push({ bin_id: 2, bin_code: 'PICK-01', zone_id: 2, zone_name: 'Picking' });
   apiGetMock.mockImplementation((url) => {
     if (url.startsWith('/admin/warehouses')) {
       return json({ warehouses: [{ warehouse_id: 1, warehouse_code: 'WH-01', warehouse_name: 'Main' }] });
     }
-    if (url.startsWith('/admin/bins')) {
-      return json({ bins: [{ bin_id: 3, bin_code: 'BULK-01', zone_id: 4, zone_name: 'Bulk' }] });
-    }
+    if (url.startsWith('/admin/bins')) return json({ bins });
     if (url.startsWith('/admin/inventory')) {
       return json({
         inventory: [
@@ -68,6 +68,11 @@ beforeEach(() => {
     }
     return json({});
   });
+}
+
+beforeEach(() => {
+  apiGetMock.mockReset();
+  mockApi();
 });
 
 describe('Inventory per-bin availability', () => {
@@ -77,8 +82,12 @@ describe('Inventory per-bin availability', () => {
     expect(screen.getByText('72')).toBeTruthy();
   });
 
-  it('shows an empty bin as 0, never as -(item commitment)', async () => {
+  it('hides zero-stock rows by default and shows 0 (not -156) when revealed', async () => {
     render(<Inventory />);
+    await waitFor(() => expect(screen.getAllByText('BULK-01').length).toBeGreaterThan(0));
+    expect(screen.queryByText('RECV-01')).toBeNull();
+
+    fireEvent.click(screen.getByLabelText('Hide zero-stock rows'));
     await waitFor(() => expect(screen.getAllByText('RECV-01').length).toBeGreaterThan(0));
     expect(screen.queryByText('-156')).toBeNull();
     const recvRow = screen.getAllByText('RECV-01')[0].closest('tr');
@@ -90,5 +99,19 @@ describe('Inventory per-bin availability', () => {
     render(<Inventory />);
     await waitFor(() => expect(screen.getAllByText('BULK-01').length).toBeGreaterThan(0));
     expect(screen.getByText('Committed (item total)')).toBeTruthy();
+  });
+
+  it('hides the Zone column in a single-zone warehouse', async () => {
+    render(<Inventory />);
+    await waitFor(() => expect(screen.getAllByText('BULK-01').length).toBeGreaterThan(0));
+    expect(screen.queryByText('Zone')).toBeNull();
+  });
+
+  it('keeps the Zone column when the warehouse has several zones', async () => {
+    apiGetMock.mockReset();
+    mockApi({ zoneCount: 2 });
+    render(<Inventory />);
+    await waitFor(() => expect(screen.getAllByText('BULK-01').length).toBeGreaterThan(0));
+    expect(screen.getByText('Zone')).toBeTruthy();
   });
 });

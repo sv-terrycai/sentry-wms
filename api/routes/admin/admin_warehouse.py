@@ -408,6 +408,23 @@ def get_bin(bin_id):
 def create_bin(validated):
     data = validated.model_dump()
 
+    # A single-zone warehouse does not need the operator to pick a zone.
+    # Resolve it when omitted; multiple zones still require an explicit one
+    # so a bin cannot silently land in the wrong area.
+    if not data.get("zone_id"):
+        zones = g.db.execute(
+            text("SELECT zone_id FROM zones WHERE warehouse_id = :wid "
+                 "AND is_active ORDER BY zone_id"),
+            {"wid": data["warehouse_id"]},
+        ).fetchall()
+        if len(zones) == 1:
+            data["zone_id"] = zones[0].zone_id
+        elif not zones:
+            return jsonify({"error": "Warehouse has no zone; create one zone first"}), 400
+        else:
+            return jsonify({"error": "zone_id is required when the warehouse "
+                                     "has more than one zone"}), 400
+
     dup = g.db.execute(
         text("SELECT 1 FROM bins WHERE warehouse_id = :wid AND bin_code = :code"),
         {"wid": data["warehouse_id"], "code": data["bin_code"]},

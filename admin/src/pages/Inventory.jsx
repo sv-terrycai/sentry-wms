@@ -25,6 +25,10 @@ export default function Inventory() {
   const [sortKey, setSortKey] = useState(null);
   const [sortDir, setSortDir] = useState('asc');
   const [loading, setLoading] = useState(false);
+  // Most bin rows are empty most of the time; hiding them is the useful
+  // default, but the toggle stays in reach for stocktake.
+  const [hideZeroRows, setHideZeroRows] = useState(true);
+  const [zoneCount, setZoneCount] = useState(0);
 
   // Load all warehouses once for the filter dropdown. Independent of topbar
   // context so the page-level filter works even if topbar picker doesn't.
@@ -56,6 +60,10 @@ export default function Inventory() {
       if (!res?.ok) return;
       const json = await res.json();
       setBins(json.bins || []);
+      // A single-zone warehouse does not need zone chrome: the column and
+      // the zone text in the bin dropdown are noise there.
+      const zones = new Set((json.bins || []).map((b) => b.zone_id).filter(Boolean));
+      setZoneCount(zones.size);
       // Reset bin filter if the previously-selected bin doesn't belong to
       // the new warehouse (prevents stale filter rejecting all results).
       if (binFilter) {
@@ -97,8 +105,14 @@ export default function Inventory() {
   }
 
   const sorted = useMemo(() => {
-    if (!sortKey) return data;
-    return [...data].sort((a, b) => {
+    // Hide zero rows AFTER filtering, before sorting: an empty bin has
+    // nothing to inspect unless the operator is doing a stocktake.
+    const visible = hideZeroRows
+      ? data.filter((r) => (r.quantity_on_hand || 0) !== 0
+        || (r.quantity_allocated || 0) !== 0)
+      : data;
+    if (!sortKey) return visible;
+    return [...visible].sort((a, b) => {
       let av = a[sortKey], bv = b[sortKey];
       if (av == null) av = '';
       if (bv == null) bv = '';
@@ -108,18 +122,21 @@ export default function Inventory() {
       const cmp = String(av).localeCompare(String(bv), undefined, { numeric: true });
       return sortDir === 'asc' ? cmp : -cmp;
     });
-  }, [data, sortKey, sortDir]);
+  }, [data, sortKey, sortDir, hideZeroRows]);
 
   const columns = [
     { key: 'sku', label: 'SKU', mono: true, sortable: true },
     { key: 'item_name', label: 'Item Name', sortable: true },
     { key: 'bin_code', label: 'Bin Code', mono: true, sortable: true },
-    { key: 'zone_name', label: 'Zone', sortable: true },
+    // One zone in the warehouse means the column repeats the same value on
+    // every row; drop it there and keep it for multi-zone sites.
+    ...(zoneCount > 1 ? [{ key: 'zone_name', label: 'Zone', sortable: true }] : []),
     { key: 'quantity_on_hand', label: 'On Hand', sortable: true },
-    // Available belongs to THIS bin row: on_hand - allocated from the same
-    // inventory row. Never subtract the item-level commitment here — doing
-    // that made every zero-stock bin show -(all unshipped units for the
-    // item), e.g. RECV-01 0 on hand rendered as -156.
+    { key: 'quantity_allocated', label: 'Allocated', sortable: true },
+    // Available belongs to THIS bin row: on_hand - allocated, both from the
+    // same inventory row. Never subtract the item-level commitment here —
+    // doing that made every zero-stock bin show -(all unshipped units for
+    // the item), e.g. RECV-01 0 on hand rendered as -156.
     {
       key: 'quantity_available',
       label: 'Available',
@@ -171,11 +188,19 @@ export default function Inventory() {
             const bId = b.bin_id || b.id;
             return (
               <option key={bId} value={bId}>
-                {b.bin_code}{b.zone_name ? ` (${b.zone_name})` : ''}
+                {b.bin_code}{zoneCount > 1 && b.zone_name ? ` (${b.zone_name})` : ''}
               </option>
             );
           })}
         </select>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13 }}>
+          <input
+            type="checkbox"
+            checked={hideZeroRows}
+            onChange={(e) => { setHideZeroRows(e.target.checked); setPage(1); }}
+          />
+          Hide zero-stock rows
+        </label>
         <input
           className="form-input"
           placeholder="Search by SKU or item name (press Enter)"
